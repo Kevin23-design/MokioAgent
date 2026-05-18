@@ -25,7 +25,7 @@ def main(
     task: Annotated[str | None, typer.Argument(help="Natural-language task for the CodeAgent.")] = None,
     workspace: Annotated[
         Path | None,
-        typer.Option("--workspace", "-w", help="Workspace for generated files. Defaults to .mokioclaw/workspace."),
+        typer.Option("--workspace", "-w", help="Workspace for generated files. Defaults to a fresh .mokioclaw/workspaces/workspace-* directory."),
     ] = None,
     max_attempts: Annotated[
         int,

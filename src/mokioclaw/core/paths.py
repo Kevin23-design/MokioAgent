@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 
 def find_project_root(start: Path | None = None) -> Path:
@@ -16,4 +18,14 @@ def find_project_root(start: Path | None = None) -> Path:
 
 
 def default_workspace(root: Path | None = None) -> Path:
-    return (root or find_project_root()) / ".mokioclaw" / "workspace"
+    return new_task_workspace(root)
+
+
+def default_workspace_root(root: Path | None = None) -> Path:
+    return (root or find_project_root()) / ".mokioclaw" / "workspaces"
+
+
+def new_task_workspace(root: Path | None = None) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = uuid4().hex[:6]
+    return default_workspace_root(root) / f"workspace-{stamp}-{suffix}"

@@ -153,10 +153,14 @@ MokioAgent/
 ```text
 .mokioclaw/
 └─ workspace/
-   ├─ TODO.md       # 当前任务计划、todo、验收标准和验证命令
-   ├─ NOTEPAD.md    # 长期工作笔记，压缩后仍可恢复关键信息
-   └─ ... Agent 生成的代码、页面、测试和运行产物
+   └─ workspaces/
+      └─ workspace-YYYYMMDD-HHMMSS-xxxxxx/
+         ├─ TODO.md       # 当前任务计划、todo、验收标准和验证命令
+         ├─ NOTEPAD.md    # 长期工作笔记，压缩后仍可恢复关键信息
+         └─ ... Agent 生成的代码、页面、测试和运行产物
 ```
+
+默认每次新任务都会创建一个新的 `workspace-*` 目录，避免不同任务互相污染。需要复用或指定目录时，可以显式传入 `--workspace`。
 
 ## 示例执行链路
 
@@ -164,6 +168,12 @@ MokioAgent/
 
 ```bash
 uv run mokioclaw "帮我查阅明日方舟阿米娅，并编写一个 HTML 介绍人物"
+```
+
+指定 workspace：
+
+```bash
+uv run mokioclaw --workspace .mokioclaw/workspaces/demo "帮我查阅明日方舟阿米娅，并编写一个 HTML 介绍人物"
 ```
 
 典型链路：
