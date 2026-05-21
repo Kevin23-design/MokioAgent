@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from mokioclaw.cli.formatter import render_context_compression, render_context_monitor, render_plan, render_sources, render_verifier
+from mokioclaw.cli.formatter import (
+    render_context_compression,
+    render_context_monitor,
+    render_memory_snapshot,
+    render_plan,
+    render_sources,
+    render_verifier,
+)
 
 
 def test_render_plan_handles_todo_table(capsys) -> None:
@@ -98,3 +105,55 @@ def test_tool_result_formats_notepad_content(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "Important note" in output
+
+
+def test_render_memory_snapshot(capsys) -> None:
+    render_memory_snapshot(
+        {
+            "node": "planner",
+            "rules_count": 5,
+            "todo_count": 2,
+            "source_count": 1,
+            "handoff_count": 1,
+            "notepad_exists": True,
+            "history_exists": False,
+            "history_path": "HISTORY_SUMMARY.md",
+            "layers": {
+                "rules": "workspace rules",
+                "working_memory": "task and todos",
+                "history_summary_store": "notepad and summary",
+            },
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Memory Snapshot" in output
+    assert "working_memory" in output
+    assert "HISTORY_SUMMARY.md" in output
+
+
+def test_print_custom_event_handles_memory_snapshot(capsys) -> None:
+    from mokioclaw.cli.formatter import print_custom_event
+
+    print_custom_event(
+        {
+            "type": "memory_snapshot",
+            "node": "verifier",
+            "rules_count": 5,
+            "todo_count": 1,
+            "source_count": 0,
+            "handoff_count": 0,
+            "notepad_exists": False,
+            "history_exists": True,
+            "history_path": "HISTORY_SUMMARY.md",
+            "layers": {
+                "rules": "rules",
+                "working_memory": "work",
+                "history_summary_store": "history",
+            },
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Memory Snapshot" in output
+    assert "verifier" in output

@@ -51,6 +51,12 @@ class CompressionEvent(TypedDict, total=False):
     next_node: str
 
 
+class LayeredMemory(TypedDict, total=False):
+    rules: dict[str, Any]
+    working_memory: dict[str, Any]
+    history_summary_store: dict[str, Any]
+
+
 class MokioGraphState(TypedDict, total=False):
     task: str
     runtime: RuntimeState
@@ -77,5 +83,7 @@ class MokioGraphState(TypedDict, total=False):
     context_should_compress: bool
     context_next_node: str
     compression_events: list[CompressionEvent]
+    memory_snapshot: LayeredMemory
+    history_summary: str
     last_error: str
     metadata: dict[str, Any]

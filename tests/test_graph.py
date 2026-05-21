@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 
 from mokioclaw.core.state import RuntimeState
+from mokioclaw.graph.memory import build_layered_memory, persist_history_summary, read_history_summary
 from mokioclaw.graph.nodes import (
     AMIYA_COMMANDS,
     _call_code_agent_tool,
@@ -114,6 +115,7 @@ def test_workflow_compiles_without_fixed_actor_node() -> None:
 
 
 def test_context_token_limit_defaults_and_env(monkeypatch) -> None:
+    monkeypatch.setattr("mokioclaw.graph.nodes.load_dotenv", lambda: None)
     monkeypatch.delenv("MOKIO_CONTEXT_TOKEN_LIMIT", raising=False)
     assert get_context_token_limit() == 400000
 
@@ -211,6 +213,8 @@ def test_context_compressor_removes_old_messages_and_preserves_state(monkeypatch
     assert result["compression_events"][0]["before_tokens"] == 1000
     assert result["compression_events"][0]["after_tokens"] == 50
     assert result["compression_events"][0]["removed_messages"] == 1
+    assert "compressed summary" in result["history_summary"]
+    assert "compressed summary" in (tmp_path / "HISTORY_SUMMARY.md").read_text(encoding="utf-8")
     assert result["todos"][0]["content"] == "verify" if "todos" in result else state["todos"][0]["content"] == "verify"
     merged = add_messages(state["messages"], result["messages"])
     assert len(merged) == 1
@@ -283,3 +287,64 @@ def test_call_code_agent_tool_updates_state(monkeypatch, tmp_path: Path) -> None
     assert state["code_agent_summary"] == "Created amiya_profile.html"
     assert state["todos"][0]["status"] == "completed"
     assert state["agent_handoffs"][0]["to_agent"] == "codeAgent"
+
+
+def test_layered_memory_splits_rules_working_and_history(tmp_path: Path) -> None:
+    runtime = RuntimeState(workspace=tmp_path)
+    (tmp_path / "NOTEPAD.md").write_text("# MokioClaw Notepad\n\nImportant durable note.\n", encoding="utf-8")
+    persist_history_summary(runtime, "Previous compressed history.")
+
+    memory = build_layered_memory(
+        {
+            "runtime": runtime,
+            "task": "demo",
+            "plan_summary": "demo plan",
+            "todos": [{"id": "todo-1", "content": "write", "status": "pending", "note": ""}],
+            "acceptance_criteria": ["file exists"],
+            "verification_commands": ["python --version"],
+            "research_notes": "research",
+            "sources": [{"title": "source", "url": "https://example.com"}],
+        },
+        node="planner",
+    )
+
+    assert set(memory) == {"rules", "working_memory", "history_summary_store"}
+    assert memory["rules"]["scope"] == "workspace"
+    assert memory["working_memory"]["task"] == "demo"
+    assert memory["working_memory"]["todos"][0]["content"] == "write"
+    assert memory["working_memory"]["sources"][0]["url"] == "https://example.com"
+    assert memory["history_summary_store"]["notepad_exists"] is True
+    assert "Important durable note" in memory["history_summary_store"]["notepad"]
+    assert "Previous compressed history" in memory["history_summary_store"]["history_summary"]
+
+
+def test_layered_memory_trims_long_history_and_handoffs(tmp_path: Path) -> None:
+    runtime = RuntimeState(workspace=tmp_path)
+    (tmp_path / "NOTEPAD.md").write_text("note " * 1000, encoding="utf-8")
+    handoffs = [
+        {"from_agent": "planner", "to_agent": "codeAgent", "instruction": "i" * 1000, "result": "r" * 1000}
+        for _ in range(8)
+    ]
+
+    memory = build_layered_memory(
+        {
+            "runtime": runtime,
+            "task": "demo",
+            "research_notes": "research " * 1000,
+            "agent_handoffs": handoffs,
+        },
+        node="planner",
+    )
+
+    assert len(memory["working_memory"]["research_notes"]) <= 1600
+    assert len(memory["working_memory"]["agent_handoffs"]) == 6
+    assert len(memory["working_memory"]["agent_handoffs"][0]["instruction"]) <= 500
+    assert len(memory["history_summary_store"]["notepad"]) <= 1800
+
+
+def test_history_summary_read_missing_file(tmp_path: Path) -> None:
+    result = read_history_summary(RuntimeState(workspace=tmp_path))
+
+    assert result["ok"] is True
+    assert result["exists"] is False
+    assert result["content"] == ""

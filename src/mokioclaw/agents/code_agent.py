@@ -7,11 +7,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import StructuredTool
 
 from mokioclaw.core.state import RuntimeState
+from mokioclaw.graph.memory import build_layered_memory, format_layered_memory_for_prompt, memory_event
 from mokioclaw.graph.state import MokioGraphState
 from mokioclaw.prompts.stage3 import CODE_AGENT_PROMPT
 from mokioclaw.providers.openai_provider import create_model
 from mokioclaw.tools import build_tools
-from mokioclaw.tools.notepad_tool import read_notepad
 from mokioclaw.tools.todo_tool import persist_todos, update_todo
 
 
@@ -28,6 +28,8 @@ def run_code_agent(
     runtime = state["runtime"]
     todos = [dict(todo) for todo in state.get("todos", [])]
     writer = writer or (lambda _: None)
+    memory = build_layered_memory({**state, "todos": todos}, node="codeAgent")
+    writer(memory_event(memory, node="codeAgent"))
     model = create_model()
     code_agent = model.bind_tools(build_tools(runtime) + [_build_todo_update_tool(todos)])
 
@@ -43,7 +45,7 @@ def run_code_agent(
 
     messages = [
         SystemMessage(content=CODE_AGENT_PROMPT),
-        HumanMessage(content=_code_agent_input(state, instruction, todos)),
+        HumanMessage(content=_code_agent_input(state, instruction, memory)),
     ]
     produced_messages: list[Any] = []
     tool_events: list[dict[str, Any]] = []
@@ -139,24 +141,12 @@ def _build_todo_update_tool(todos: list[dict[str, str]]) -> StructuredTool:
     )
 
 
-def _code_agent_input(state: MokioGraphState, instruction: str, todos: list[dict[str, Any]]) -> str:
-    todo_text = "\n".join(f"- {todo['id']} [{todo['status']}] {todo['content']}" for todo in todos)
-    criteria_text = "\n".join(f"- {item}" for item in state.get("acceptance_criteria", []))
-    command_text = "\n".join(f"- {command}" for command in state.get("verification_commands", []))
-    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
-    notepad = read_notepad(state["runtime"])
-    notepad_text = notepad.get("content", "")
+def _code_agent_input(state: MokioGraphState, instruction: str, memory: dict[str, Any]) -> str:
     return (
         f"Task: {state['task']}\n\n"
         f"Planner instruction:\n{instruction}\n\n"
-        f"Plan: {state.get('plan_summary', '')}\n\n"
-        f"Todos:\n{todo_text}\n\n"
-        f"Acceptance criteria:\n{criteria_text}\n\n"
-        f"Verification commands:\n{command_text}\n\n"
-        f"Research notes:\n{state.get('research_notes', '')}\n\n"
-        f"Sources:\n{source_text}\n\n"
-        f"Workspace notepad:\n{notepad_text}\n\n"
-        f"Previous verifier failure:\n{state.get('last_error', '')}"
+        "Layered memory snapshot:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
     )
 
 

@@ -13,12 +13,17 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from mokioclaw.agents.code_agent import run_code_agent
 from mokioclaw.agents.search_agent import run_search_agent
+from mokioclaw.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+    memory_event,
+    persist_history_summary,
+)
 from mokioclaw.graph.state import MokioGraphState, TodoItem, VerificationCheck
 from mokioclaw.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from mokioclaw.prompts.stage4 import CONTEXT_COMPRESSION_PROMPT
 from mokioclaw.providers.openai_provider import create_model
 from mokioclaw.tools import build_read_only_tools
-from mokioclaw.tools.notepad_tool import read_notepad
 from mokioclaw.tools.todo_tool import persist_todos, write_todos
 
 
@@ -62,11 +67,13 @@ def planner_node(state: MokioGraphState) -> dict[str, Any]:
             working_state.get("plan_summary", ""),
         )
 
+    memory = build_layered_memory(working_state, node="planner")
+    writer(memory_event(memory, node="planner"))
     model = create_model()
     planner = model.bind_tools(_build_planner_tools(working_state, writer))
     messages: list[Any] = [
         SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(content=_planner_input(working_state)),
+        HumanMessage(content=_planner_input(working_state, memory)),
     ]
     produced_messages: list[Any] = []
 
@@ -97,6 +104,7 @@ def planner_node(state: MokioGraphState) -> dict[str, Any]:
 
     metadata = dict(working_state.get("metadata", {}))
     metadata["planner_raw"] = _last_ai_content(produced_messages)
+    final_memory = build_layered_memory(working_state, node="planner")
     return {
         "plan_summary": working_state.get("plan_summary", ""),
         "todos": working_state.get("todos", []),
@@ -108,6 +116,8 @@ def planner_node(state: MokioGraphState) -> dict[str, Any]:
         "code_agent_summary": working_state.get("code_agent_summary", ""),
         "last_actor_summary": working_state.get("code_agent_summary", ""),
         "messages": produced_messages,
+        "memory_snapshot": final_memory,
+        "history_summary": final_memory.get("history_summary_store", {}).get("history_summary", ""),
         "metadata": metadata,
         "context_next_node": "verifier",
     }
@@ -115,6 +125,8 @@ def planner_node(state: MokioGraphState) -> dict[str, Any]:
 
 def verifier_node(state: MokioGraphState) -> dict[str, Any]:
     writer = _get_writer()
+    memory = build_layered_memory(state, node="verifier")
+    writer(memory_event(memory, node="verifier"))
     writer(
         {
             "type": "plan_snapshot",
@@ -129,7 +141,7 @@ def verifier_node(state: MokioGraphState) -> dict[str, Any]:
     verifier = model.bind_tools(build_read_only_tools(state["runtime"]))
     messages: list[Any] = [
         SystemMessage(content=VERIFIER_PROMPT),
-        HumanMessage(content=_verifier_input(state)),
+        HumanMessage(content=_verifier_input(state, memory)),
     ]
     produced_messages: list[Any] = []
     tool_events: list[dict[str, Any]] = []
@@ -211,6 +223,8 @@ def verifier_node(state: MokioGraphState) -> dict[str, Any]:
         "attempts": attempts,
         "last_error": last_error,
         "todos": todos,
+        "memory_snapshot": memory,
+        "history_summary": memory.get("history_summary_store", {}).get("history_summary", ""),
         "context_next_node": verifier_route({**state, "passed": passed, "attempts": attempts}),
     }
 
@@ -248,14 +262,22 @@ def context_compressor_node(state: MokioGraphState) -> dict[str, Any]:
     writer = _get_writer()
     before_tokens = state.get("context_token_count") or estimate_context_tokens(state)
     before_messages = list(state.get("messages", []))
+    memory = build_layered_memory(state, node="context_compressor")
+    writer(memory_event(memory, node="context_compressor"))
     compressed = _compress_context_with_model(state)
     summary = _format_compressed_context(compressed, state)
     summary_message = AIMessage(content=summary)
+    persist_history_summary(state["runtime"], summary)
 
     post_state: MokioGraphState = {
         **state,
         "messages": [summary_message],
         "context_summary": summary,
+        "history_summary": summary,
+        "memory_snapshot": build_layered_memory(
+            {**state, "context_summary": summary, "history_summary": summary},
+            node="context_compressor",
+        ),
         "research_notes": _short_text(state.get("research_notes", ""), 1200),
         "agent_handoffs": _trim_handoffs(state.get("agent_handoffs", [])),
         "last_error": _short_text(state.get("last_error", ""), 1600),
@@ -282,6 +304,8 @@ def context_compressor_node(state: MokioGraphState) -> dict[str, Any]:
         "last_error": post_state.get("last_error", ""),
         "code_agent_summary": post_state.get("code_agent_summary", ""),
         "verifier_summary": post_state.get("verifier_summary", ""),
+        "memory_snapshot": post_state.get("memory_snapshot", {}),
+        "history_summary": summary,
         "compression_events": events,
     }
 
@@ -340,7 +364,7 @@ def get_context_token_limit() -> int:
 
 def estimate_context_tokens(state: MokioGraphState) -> int:
     messages = list(state.get("messages", []))
-    payload = _context_payload(state)
+    payload = build_layered_memory(state, node="context_monitor")
     payload_message = HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str))
     try:
         model = create_model()
@@ -495,9 +519,10 @@ def _execute_read_only_tool(state: MokioGraphState, call: dict[str, Any]) -> Too
 
 
 def _compress_context_with_model(state: MokioGraphState) -> dict[str, Any]:
+    memory = build_layered_memory(state, node="context_compressor")
     payload = {
         "context_summary": state.get("context_summary", ""),
-        "state": _context_payload(state),
+        "memory": memory,
         "messages": [_message_snapshot(message) for message in state.get("messages", [])],
     }
     messages = [
@@ -559,29 +584,7 @@ def _format_compressed_context(compressed: dict[str, Any], state: MokioGraphStat
 
 
 def _context_payload(state: MokioGraphState) -> dict[str, Any]:
-    return {
-        "task": state.get("task", ""),
-        "plan_summary": state.get("plan_summary", ""),
-        "todos": state.get("todos", []),
-        "acceptance_criteria": state.get("acceptance_criteria", []),
-        "verification_commands": state.get("verification_commands", []),
-        "research_notes": state.get("research_notes", ""),
-        "sources": [
-            {"title": source.get("title", ""), "url": source.get("url", "")}
-            for source in state.get("sources", [])
-        ],
-        "notepad": read_notepad(state["runtime"]).get("content", ""),
-        "agent_handoffs": state.get("agent_handoffs", []),
-        "code_agent_summary": state.get("code_agent_summary", ""),
-        "verifier_summary": state.get("verifier_summary", ""),
-        "verification_checks": state.get("verification_checks", []),
-        "last_error": state.get("last_error", ""),
-        "attempts": state.get("attempts", 0),
-        "max_attempts": state.get("max_attempts", 3),
-        "context_summary": state.get("context_summary", ""),
-        "context_next_node": state.get("context_next_node", ""),
-        "compression_events": state.get("compression_events", []),
-    }
+    return build_layered_memory(state, node="graph")
 
 
 def _message_snapshot(message: Any) -> dict[str, str]:
@@ -615,39 +618,20 @@ def _important_files_from_state(state: MokioGraphState) -> list[str]:
     return deduped
 
 
-def _planner_input(state: MokioGraphState) -> str:
-    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
-    notepad_text = read_notepad(state["runtime"]).get("content", "")
+def _planner_input(state: MokioGraphState, memory: dict[str, Any]) -> str:
     return (
         f"Task: {state['task']}\n"
         f"Attempt: {state.get('attempts', 0) + 1}\n\n"
-        f"Current plan: {state.get('plan_summary', '')}\n"
-        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
-        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
-        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
-        f"Research notes:\n{state.get('research_notes', '')}\n\n"
-        f"Sources:\n{source_text}\n\n"
-        f"Workspace notepad:\n{notepad_text}\n\n"
-        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
-        f"Previous verifier failure:\n{state.get('last_error', '')}"
-        f"\n\nCompressed context summary, if any:\n{state.get('context_summary', '')}"
+        "Layered memory snapshot:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
     )
 
 
-def _verifier_input(state: MokioGraphState) -> str:
-    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
-    notepad_text = read_notepad(state["runtime"]).get("content", "")
+def _verifier_input(state: MokioGraphState, memory: dict[str, Any]) -> str:
     return (
         f"Task: {state['task']}\n\n"
-        f"Plan: {state.get('plan_summary', '')}\n\n"
-        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
-        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
-        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
-        f"Research notes:\n{state.get('research_notes', '')}\n\n"
-        f"Sources:\n{source_text}\n\n"
-        f"Workspace notepad:\n{notepad_text}\n\n"
-        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
-        f"Compressed context summary:\n{state.get('context_summary', '')}\n\n"
+        "Layered memory snapshot:\n"
+        f"{format_layered_memory_for_prompt(memory)}\n\n"
         "Inspect the workspace with tools and return only verifier JSON."
     )
 
