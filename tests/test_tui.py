@@ -7,6 +7,7 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 from mokioclaw.cli.app import app
+from mokioclaw.cli.event_summary import summarize_event
 from mokioclaw.cli.tui import MokioClawTuiApp
 from mokioclaw.cli.tui.approval import ApprovalGate
 from mokioclaw.cli.tui.logo import render_logo
@@ -145,6 +146,50 @@ def test_tui_renders_lightweight_chat_response() -> None:
     asyncio.run(run())
 
 
+def test_tui_chat_response_keeps_long_body_visible() -> None:
+    body = (
+        "Cloudflare 是一家云服务平台。\n"
+        "- CDN 与性能优化。\n"
+        "- 安全能力：DDoS 防护、WAF、Bot 管理。\n"
+        "- DNS 服务：托管权威 DNS、DNSSEC、智能解析和全局 Anycast 网络。"
+    )
+
+    async def run() -> None:
+        app = MokioClawTuiApp(stream_factory=lambda *args, **kwargs: [])
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._handle_event(
+                {
+                    "type": "custom_event",
+                    "event": {"type": "chat_response", "mode": "lightweight", "reason": "q&a", "response": body},
+                }
+            )
+            await pilot.pause(0.1)
+            summary = summarize_event(
+                {"type": "custom_event", "event": {"type": "chat_response", "mode": "lightweight", "reason": "q&a", "response": body}}
+            )
+            assert "DNSSEC" in app._compact_body(summary)
+
+    asyncio.run(run())
+
+    summary = summarize_event({"type": "custom_event", "event": {"type": "chat_response", "response": body}})
+    assert "DNSSEC" in summary.body
+
+
+def test_tui_hides_low_level_entry_graph_updates() -> None:
+    async def run() -> None:
+        app = MokioClawTuiApp(stream_factory=lambda *args, **kwargs: [])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.1)
+            before = len(app.query_one("#events").children)
+            app._handle_event({"type": "graph_event", "event": {"intent_router": {"intent_route": "chat"}}})
+            app._handle_event({"type": "graph_event", "event": {"chat_responder": {"chat_response": "hi"}}})
+            app._handle_event({"type": "custom_event", "event": {"type": "session_turn_started", "turn": 1, "task": "hello"}})
+            await pilot.pause(0.1)
+            assert len(app.query_one("#events").children) == before
+
+    asyncio.run(run())
+
+
 def test_tui_input_bar_stays_visible() -> None:
     async def run() -> None:
         app = MokioClawTuiApp(stream_factory=lambda *args, **kwargs: [])
@@ -155,6 +200,18 @@ def test_tui_input_bar_stays_visible() -> None:
             footer = app.query_one("Footer")
             assert input_widget.region.y < footer.region.y
             assert input_widget.value == "hello"
+
+    asyncio.run(run())
+
+
+def test_tui_user_message_card_keeps_compact_height() -> None:
+    async def run() -> None:
+        app = MokioClawTuiApp(stream_factory=lambda *args, **kwargs: [])
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._write_run_start("你好", None)
+            await pilot.pause(0.1)
+            user_card = app.query(".event-user").last()
+            assert user_card.region.height <= 4
 
     asyncio.run(run())
 
