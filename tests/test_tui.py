@@ -114,8 +114,8 @@ def test_tui_renders_fake_stream_events(tmp_path) -> None:
         app = MokioClawTuiApp(initial_task="demo task", stream_factory=fake_stream)
         async with app.run_test(size=(120, 36)) as pilot:
             await pilot.pause(0.3)
-            assert "workspace-a" in app.sidebar_text
-            assert "trace-demo" in app.sidebar_text
+            assert "workspace-a" in app.latest_workspace
+            assert "trace-demo" in app.latest_trace
             assert "session-demo" in app.sidebar_text
             assert app.run_count == 1
             assert not app.running
